@@ -1,0 +1,58 @@
+# BrainTech ニュースボット: 2 時間おき（UTC 基準、cron: 0 */2 * * *）＝ 1 日 12 回
+#
+# 必要な Repository secrets:
+#   GEMINI_API_KEY
+#   BLUESKY_HANDLE
+#   BLUESKY_APP_PASSWORD
+# 任意: GEMINI_MODEL
+
+name: BrainTech News Bot
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: news-bot
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+      BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        run: python main.py
+
+      - name: Commit and push last_post.txt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_post.txt
+          if git diff --staged --quiet; then
+            echo "No changes to last_post.txt"
+          else
+            git commit -m "chore: update last_post.txt [skip ci]"
+            git push
+          fi
