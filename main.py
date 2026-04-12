@@ -7,8 +7,8 @@ Bluesky にリンクカード付きで投稿する。
   任意: GEMINI_MODEL（既定: gemini-2.5-flash → gemini-2.5-flash-lite）
   任意: DRY_RUN=1 で Bluesky への投稿をスキップし、生成テキストのみ表示
 
-直近投稿した記事 URL を last_post.txt に保存し、新しい順の一覧の先頭から
-最初の「未投稿」（保存 URL と一致しない）記事を投稿する。
+投稿済み記事 URL を last_post.txt に 1 行 1 URL で蓄え（直近 100 件を上限）、
+新しい順の一覧の先頭から、履歴に無い最初の記事（未投稿のうち最新）を投稿する。
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ RSS_FEEDS: tuple[str, ...] = (
 POST_MAX = 300
 DEFAULT_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
 LAST_POST_FILE = Path(__file__).resolve().parent / "last_post.txt"
+POSTED_URL_HISTORY_MAX = 100
 
 
 def _default_http_headers() -> dict[str, str]:
@@ -233,18 +234,48 @@ def fetch_all_entries() -> list[tuple[str, str, str]]:
     return out
 
 
-def read_last_post_url() -> str | None:
+def load_posted_urls() -> set[str]:
+    """last_post.txt の全行を読み、正規化した URL の集合を返す。"""
     if not LAST_POST_FILE.is_file():
-        return None
+        return set()
     try:
-        s = LAST_POST_FILE.read_text(encoding="utf-8").strip()
-        return normalize_article_url(s) if s else None
+        raw = LAST_POST_FILE.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return set()
+    out: set[str] = set()
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        out.add(normalize_article_url(s))
+    return out
 
 
-def write_last_post_url(url: str) -> None:
-    LAST_POST_FILE.write_text(normalize_article_url(url) + "\n", encoding="utf-8")
+def _trim_posted_url_file() -> None:
+    """追記で増えすぎた履歴を末尾 POSTED_URL_HISTORY_MAX 行に切り詰める。"""
+    try:
+        raw = LAST_POST_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return
+    lines = [normalize_article_url(l.strip()) for l in raw.splitlines() if l.strip()]
+    if len(lines) <= POSTED_URL_HISTORY_MAX:
+        return
+    kept = lines[-POSTED_URL_HISTORY_MAX:]
+    try:
+        LAST_POST_FILE.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def append_posted_url(url: str) -> None:
+    """新しい投稿 URL を 1 行追記し、履歴が長すぎる場合は古い行から削除する。"""
+    normalized = normalize_article_url(url)
+    try:
+        with LAST_POST_FILE.open("a", encoding="utf-8") as f:
+            f.write(normalized + "\n")
+    except OSError:
+        return
+    _trim_posted_url_file()
 
 
 def body_char_budget() -> int:
@@ -367,13 +398,13 @@ def post_to_bluesky(
 
 def main() -> None:
     load_env()
-    last_key = read_last_post_url()
+    posted_urls = load_posted_urls()
     entries = fetch_all_entries()
 
     chosen: tuple[str, str, str] | None = None
     for title, content, article_url in entries:
         article_url = normalize_article_url(article_url)
-        if last_key is None or article_url != last_key:
+        if article_url not in posted_urls:
             chosen = (title, content, article_url)
             break
 
@@ -388,7 +419,7 @@ def main() -> None:
     preview = fetch_link_preview(article_url)
     post_to_bluesky(body_text, article_url, rss_title=title, preview=preview)
     if not _dry_run():
-        write_last_post_url(article_url)
+        append_posted_url(article_url)
     print(body_text)
 
 
