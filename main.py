@@ -42,15 +42,20 @@ DEFAULT_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
 LAST_POST_FILE = Path(__file__).resolve().parent / "last_post.txt"
 
 def _default_http_headers() -> dict[str, str]:
-    """Google / 各メディアがボット用 UA で異なるページを返さないようブラウザに近いヘッダにする。"""
+    """最新 Chrome (Windows) に固定し、メディア側のボット扱い・Google 中間ページ固定を避ける。"""
     return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
     }
 
 
@@ -78,23 +83,33 @@ def _hostname(url: str) -> str:
         return ""
 
 
-def _is_google_host(host: str) -> bool:
+def _google_service_host(host: str) -> bool:
+    """Google 検索・ニュース・CDN・usercontent 等（出版社の記事オリジンとして不適なホスト）。"""
     if not host:
-        return False
-    return host == "google.com" or host.endswith(".google.com")
+        return True
+    h = host.lower()
+    if "googleusercontent" in h:
+        return True
+    if h == "gstatic.com" or h.endswith(".gstatic.com"):
+        return True
+    # *.google.com / news.google.co.uk 等
+    if re.match(r"^([a-z0-9-]+\.)*google\.[a-z.]+$", h):
+        return True
+    return False
 
 
 def _unwrap_google_url_query(url: str) -> str | None:
-    """google.com/url や news.google のクエリ q=/url= から転送先（出版社記事）を取り出す。"""
+    """google.com/url や news.google のクエリから転送先（出版社記事）を取り出す。"""
     try:
-        if not _is_google_host(_hostname(url)):
+        if not _google_service_host(_hostname(url)):
             return None
-        qs = parse_qs(urlparse(url).query)
-        for key in ("q", "url", "u"):
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        for key in ("q", "url", "u", "target", "dest", "continue"):
             if key not in qs or not qs[key]:
                 continue
             cand = unquote(qs[key][0]).strip()
-            if cand.startswith("http") and not _is_google_host(_hostname(cand)):
+            if cand.startswith("http") and not _google_service_host(_hostname(cand)):
                 return normalize_article_url(cand)
         return None
     except Exception:
@@ -110,7 +125,7 @@ def _publisher_from_google_news_html(html: str, page_url: str) -> str | None:
         m = re.search(r"url=(?P<u>[^;]+)", str(content), re.I)
         if m:
             cand = m.group("u").strip().strip("'\"")
-            if cand.startswith("http") and not _is_google_host(_hostname(cand)):
+            if cand.startswith("http") and not _google_service_host(_hostname(cand)):
                 return normalize_article_url(cand)
 
     for link in soup.find_all("link", rel=True):
@@ -118,14 +133,14 @@ def _publisher_from_google_news_html(html: str, page_url: str) -> str | None:
         if "canonical" not in rel:
             continue
         href = (link.get("href") or "").strip()
-        if href.startswith("http") and not _is_google_host(_hostname(href)):
+        if href.startswith("http") and not _google_service_host(_hostname(href)):
             return normalize_article_url(href)
 
     for prop in ("og:url",):
         tag = soup.find("meta", property=prop) or soup.find("meta", attrs={"name": prop})
         if tag and tag.get("content"):
             href = str(tag["content"]).strip()
-            if href.startswith("http") and not _is_google_host(_hostname(href)):
+            if href.startswith("http") and not _google_service_host(_hostname(href)):
                 return normalize_article_url(href)
 
     for script in soup.find_all("script", type=lambda t: t and "ld+json" in str(t).lower()):
@@ -142,12 +157,12 @@ def _publisher_from_google_news_html(html: str, page_url: str) -> str | None:
                 continue
             for key in ("url", "@id"):
                 v = item.get(key)
-                if isinstance(v, str) and v.startswith("http") and not _is_google_host(_hostname(v)):
+                if isinstance(v, str) and v.startswith("http") and not _google_service_host(_hostname(v)):
                     return normalize_article_url(v)
             mep = item.get("mainEntityOfPage")
             if isinstance(mep, dict):
                 v = mep.get("@id") or mep.get("url")
-                if isinstance(v, str) and v.startswith("http") and not _is_google_host(_hostname(v)):
+                if isinstance(v, str) and v.startswith("http") and not _google_service_host(_hostname(v)):
                     return normalize_article_url(v)
 
     candidates: list[str] = []
@@ -155,7 +170,7 @@ def _publisher_from_google_news_html(html: str, page_url: str) -> str | None:
         href = str(a["href"]).strip()
         if not href.startswith("http"):
             continue
-        if _is_google_host(_hostname(href)):
+        if _google_service_host(_hostname(href)):
             continue
         if any(x in href.lower() for x in ("doubleclick.net", "googleadservices", "googlesyndication")):
             continue
@@ -167,27 +182,75 @@ def _publisher_from_google_news_html(html: str, page_url: str) -> str | None:
     return None
 
 
-def resolve_final_url(url: str, timeout: float = 30.0) -> str:
-    """リダイレクトと Google 中間ページを解消し、出版社サイトの記事 URL を返す（OGP はこの URL で取得する）。"""
+_URL_SCRAPE = re.compile(
+    r"https?://[a-zA-Z0-9][-a-zA-Z0-9.%_]*/[^\s\"'<>\\]{8,}",
+    re.I,
+)
+_URL_SKIP_SUBSTR = (
+    "schema.org",
+    "w3.org",
+    "xmlns",
+    "google.com/policies",
+    "gstatic.com",
+    "googleusercontent.com",
+    "facebook.com",
+    "twitter.com",
+    "googletagmanager",
+    "google-analytics",
+    "doubleclick",
+    "googleadservices",
+    "googlesyndication",
+    "googleapis.com",
+    "goo.gl",
+    "youtu.be",
+    "/logos/",
+    "/branding/",
+)
+
+
+def _extract_publisher_url_from_raw_html(html: str) -> str | None:
+    """script 内の base64 付近やプレーンテキストに埋め込まれた出版社 URL を救済抽出する。"""
+    candidates: list[str] = []
+    for m in _URL_SCRAPE.finditer(html):
+        u = m.group(0).rstrip(').,;\\"\'')
+        lu = u.lower()
+        if any(s in lu for s in _URL_SKIP_SUBSTR):
+            continue
+        h = _hostname(u)
+        if not h or _google_service_host(h):
+            continue
+        if len(u) < 28:
+            continue
+        candidates.append(u)
+    if not candidates:
+        return None
+    candidates.sort(key=len, reverse=True)
+    return normalize_article_url(candidates[0])
+
+
+def resolve_final_url(url: str, timeout: float = 35.0) -> str | None:
+    """Google ドメインを完全に抜けるまで再帰的に追跡。抜けられなければ None。"""
     u = normalize_article_url(url)
     if not u:
-        return u
+        return None
     session = requests.Session()
     session.headers.update(_REQUEST_HEADERS)
 
-    for _ in range(14):
+    for _ in range(32):
         inner = _unwrap_google_url_query(u)
         if inner:
             u = inner
+            if not _google_service_host(_hostname(u)):
+                return u
             continue
 
-        if not _is_google_host(_hostname(u)):
+        if not _google_service_host(_hostname(u)):
             return u
 
         try:
             r = session.get(u, allow_redirects=True, timeout=timeout)
         except requests.RequestException:
-            return u
+            return None
 
         cur = normalize_article_url(r.url) or u
 
@@ -196,23 +259,19 @@ def resolve_final_url(url: str, timeout: float = 30.0) -> str:
             u = inner
             continue
 
-        if not _is_google_host(_hostname(cur)):
+        if not _google_service_host(_hostname(cur)):
             return cur
 
         nxt = _publisher_from_google_news_html(r.text, cur)
+        if not nxt:
+            nxt = _extract_publisher_url_from_raw_html(r.text)
         if nxt and normalize_article_url(nxt) != cur:
             u = nxt
             continue
 
-        if _is_google_host(_hostname(cur)):
-            print(
-                "警告: 記事URLを出版社ドメインまで展開できませんでした。"
-                "OGPがGoogle用になる可能性があります。",
-                file=sys.stderr,
-            )
-        return cur
+        return None
 
-    return u
+    return None
 
 
 class LinkPreviewData(NamedTuple):
@@ -231,12 +290,24 @@ def _meta_content(soup: BeautifulSoup, *keys: str) -> str | None:
     return None
 
 
-def _fetch_image_bytes(image_url: str, timeout: float = 20.0) -> bytes | None:
+def _fetch_image_bytes(
+    image_url: str, timeout: float = 20.0, *, referer: str | None = None
+) -> bytes | None:
+    if _looks_like_google_brand_image(image_url):
+        return None
     try:
         session = requests.Session()
-        session.headers.update(_REQUEST_HEADERS)
-        r = session.get(image_url, timeout=timeout, stream=True)
+        img_headers = {
+            "User-Agent": _REQUEST_HEADERS["User-Agent"],
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        if referer:
+            img_headers["Referer"] = referer
+        session.headers.update(img_headers)
+        r = session.get(image_url, timeout=timeout, stream=True, allow_redirects=True)
         r.raise_for_status()
+        if _looks_like_google_brand_image(str(r.url)):
+            return None
         ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype and not ctype.startswith("image/"):
             return None
@@ -254,11 +325,29 @@ def _fetch_image_bytes(image_url: str, timeout: float = 20.0) -> bytes | None:
 
 
 def _looks_like_google_brand_image(image_url: str) -> bool:
-    """Google News 用の汎用アイコン・ロゴをサムネにしない（展開失敗時の保険）。"""
+    """Google 系 CDN / ロゴ用画像は記事サムネではない → リンクカードは画像なしにする。"""
     il = image_url.lower()
-    return "news.google" in il or (
-        "gstatic.com" in il and any(x in il for x in ("news", "logo", "favicon", "icon", "android-chrome"))
+    if "news.google" in il:
+        return True
+    if "googleusercontent.com" in il:
+        return True
+    if "gstatic.com" in il:
+        return True
+    path_markers = (
+        "/logos/",
+        "/branding/",
+        "favicon",
+        "/news/icon",
+        "google-news",
+        "news-s/",
+        "android-chrome",
+        "play-lh",
+        "/images/icons/",
+        "publisher-logo",
     )
+    if any(m in il for m in path_markers):
+        return True
+    return False
 
 
 def fetch_link_preview(article_url: str, timeout: float = 20.0) -> LinkPreviewData:
@@ -279,7 +368,8 @@ def fetch_link_preview(article_url: str, timeout: float = 20.0) -> LinkPreviewDa
         image_bytes: bytes | None = None
         if raw_img:
             img_url = urljoin(article_url, raw_img.strip())
-            image_bytes = _fetch_image_bytes(img_url, timeout=timeout)
+            if not _looks_like_google_brand_image(img_url):
+                image_bytes = _fetch_image_bytes(img_url, timeout=timeout, referer=article_url)
         return LinkPreviewData(title=title, description=desc, image_bytes=image_bytes)
     except (requests.RequestException, OSError):
         return LinkPreviewData(title=None, description=None, image_bytes=None)
@@ -312,7 +402,7 @@ def _prefer_direct_publisher_link(entry: object) -> str | None:
         href = (l.get("href") or "").strip()
         if not href.startswith("http"):
             continue
-        if _is_google_host(_hostname(href)):
+        if _google_service_host(_hostname(href)):
             continue
         return normalize_article_url(href)
     return None
@@ -480,6 +570,12 @@ def main() -> None:
     load_env()
     title, content, rss_link = fetch_latest_entry()
     article_url = resolve_final_url(rss_link)
+    if article_url is None or _google_service_host(_hostname(article_url)):
+        print(
+            "Could not resolve a publisher URL outside Google. Skipping post.",
+            file=sys.stderr,
+        )
+        raise SystemExit(0)
 
     last_key = read_last_post_url()
     if last_key is not None and article_url == last_key:
