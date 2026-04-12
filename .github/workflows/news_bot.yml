@@ -1,4 +1,4 @@
-# BrainTech ニュースボット: 2 時間おき（UTC 基準、cron: 0 */2 * * *）＝ 1 日 12 回
+# BrainTech ニュースボット: 1 時間おき（UTC 基準、cron: 0 * * * *）＝ 1 日 24 回
 #
 # last_post.txt をリポジトリに書き戻すため contents: write が必須。
 # .gitignore に last_post.txt を含めないこと（追跡対象にする）。
@@ -13,7 +13,7 @@ name: BrainTech News Bot
 
 on:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:

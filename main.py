@@ -7,7 +7,8 @@ Bluesky にリンクカード付きで投稿する。
   任意: GEMINI_MODEL（既定: gemini-2.5-flash → gemini-2.5-flash-lite）
   任意: DRY_RUN=1 で Bluesky への投稿をスキップし、生成テキストのみ表示
 
-直近投稿した記事 URL を last_post.txt に保存し、同一 URL ならスキップする。
+直近投稿した記事 URL を last_post.txt に保存し、新しい順の一覧の先頭から
+最初の「未投稿」（保存 URL と一致しない）記事を投稿する。
 """
 
 from __future__ import annotations
@@ -186,9 +187,19 @@ def _entry_published_ts(entry: object) -> float:
     return 0.0
 
 
-def fetch_latest_entry() -> tuple[str, str, str]:
-    """複数 RSS からエントリを集め、公開日時が最も新しい 1 件を返す。"""
-    collected: list[object] = []
+def _entry_to_article(e: object) -> tuple[str, str, str] | None:
+    title = strip_html(getattr(e, "title", "") or "")
+    link = normalize_article_url((getattr(e, "link", "") or "").strip())
+    raw = getattr(e, "summary", None) or getattr(e, "description", "") or ""
+    content = strip_html(raw) or title
+    if not title or not link:
+        return None
+    return title, content, link
+
+
+def fetch_all_entries() -> list[tuple[str, str, str]]:
+    """複数 RSS からエントリを集め、公開日時の新しい順に並べたリストを返す（同一 URL は新しい方のみ）。"""
+    scored: list[tuple[float, object]] = []
     for feed_url in RSS_FEEDS:
         parsed = feedparser.parse(feed_url)
         if getattr(parsed, "bozo", False) and not getattr(parsed, "entries", None):
@@ -196,26 +207,30 @@ def fetch_latest_entry() -> tuple[str, str, str]:
                 f"RSS 警告 ({feed_url}): {getattr(parsed, 'bozo_exception', '')}",
                 file=sys.stderr,
             )
-        collected.extend(getattr(parsed, "entries", []) or [])
+        for e in getattr(parsed, "entries", []) or []:
+            scored.append((_entry_published_ts(e), e))
 
-    if not collected:
+    if not scored:
         print("いずれの RSS からもエントリを取得できませんでした。", file=sys.stderr)
         sys.exit(1)
 
-    collected.sort(key=_entry_published_ts, reverse=True)
-    e = collected[0]
+    scored.sort(key=lambda x: x[0], reverse=True)
 
-    title = strip_html(getattr(e, "title", "") or "")
-    link = normalize_article_url((getattr(e, "link", "") or "").strip())
-    raw = getattr(e, "summary", None) or getattr(e, "description", "") or ""
-    content = strip_html(raw) or title
-    if not title:
-        print("タイトルを取得できませんでした。", file=sys.stderr)
+    seen_urls: set[str] = set()
+    out: list[tuple[str, str, str]] = []
+    for _, e in scored:
+        row = _entry_to_article(e)
+        if row is None:
+            continue
+        _, _, link = row
+        if link in seen_urls:
+            continue
+        seen_urls.add(link)
+        out.append(row)
+    if not out:
+        print("有効なエントリを 1 件も組み立てられませんでした。", file=sys.stderr)
         sys.exit(1)
-    if not link:
-        print("リンクを取得できませんでした。", file=sys.stderr)
-        sys.exit(1)
-    return title, content, link
+    return out
 
 
 def read_last_post_url() -> str | None:
@@ -352,13 +367,21 @@ def post_to_bluesky(
 
 def main() -> None:
     load_env()
-    title, content, article_url = fetch_latest_entry()
-    article_url = normalize_article_url(article_url)
-
     last_key = read_last_post_url()
-    if last_key is not None and article_url == last_key:
-        print("No new news found. Skipping post.")
+    entries = fetch_all_entries()
+
+    chosen: tuple[str, str, str] | None = None
+    for title, content, article_url in entries:
+        article_url = normalize_article_url(article_url)
+        if last_key is None or article_url != last_key:
+            chosen = (title, content, article_url)
+            break
+
+    if chosen is None:
+        print("No new news found.")
         raise SystemExit(0)
+
+    title, content, article_url = chosen
 
     body = generate_post_text(title, content, article_url)
     body_text = finalize_post_body(body)
