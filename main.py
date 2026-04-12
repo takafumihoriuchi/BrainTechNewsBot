@@ -34,6 +34,10 @@ RSS_FEEDS: tuple[str, ...] = (
     "https://www.nature.com/subjects/brain-machine-interface.rss",
     "https://neurosciencenews.com/neuroscience-topics/bci/feed/",
     "https://news.mit.edu/topic/neuroscience-rss.xml",
+    "https://spectrum.ieee.org/rss/topic/brain-machine-interfaces/fulltext",
+    "https://www.eurekalert.org/rss/neuroscience.xml",
+    "https://www.frontiersin.org/journals/neuroscience/rss",
+    "https://phys.org/rss-feed/science-news/neuroscience/",
 )
 
 POST_MAX = 300
@@ -188,17 +192,24 @@ def _entry_published_ts(entry: object) -> float:
     return 0.0
 
 
-def _entry_to_article(e: object) -> tuple[str, str, str] | None:
+def _entry_to_article(e: object) -> tuple[str, str, str, str] | None:
     title = strip_html(getattr(e, "title", "") or "")
     link = normalize_article_url((getattr(e, "link", "") or "").strip())
     raw = getattr(e, "summary", None) or getattr(e, "description", "") or ""
     content = strip_html(raw) or title
+    t = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
+    date_slash = "1970/01/01"
+    if t:
+        try:
+            date_slash = time.strftime("%Y/%m/%d", t)
+        except (TypeError, ValueError, OverflowError):
+            pass
     if not title or not link:
         return None
-    return title, content, link
+    return title, content, link, date_slash
 
 
-def fetch_all_entries() -> list[tuple[str, str, str]]:
+def fetch_all_entries() -> list[tuple[str, str, str, str]]:
     """複数 RSS からエントリを集め、公開日時の新しい順に並べたリストを返す（同一 URL は新しい方のみ）。"""
     scored: list[tuple[float, object]] = []
     for feed_url in RSS_FEEDS:
@@ -218,12 +229,12 @@ def fetch_all_entries() -> list[tuple[str, str, str]]:
     scored.sort(key=lambda x: x[0], reverse=True)
 
     seen_urls: set[str] = set()
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     for _, e in scored:
         row = _entry_to_article(e)
         if row is None:
             continue
-        _, _, link = row
+        _, _, link, _ = row
         if link in seen_urls:
             continue
         seen_urls.add(link)
@@ -299,7 +310,9 @@ def _normalize_bluesky_body_whitespace(text: str) -> str:
     return out + "\n"
 
 
-def build_prompt(title: str, content: str, article_url: str) -> str:
+def build_prompt(
+    title: str, content: str, article_url: str, published_date_slash: str
+) -> str:
     budget = body_char_budget()
     return f"""あなたはブレインテック（BCI・脳コンピュータインタフェース・神経科学など）に詳しい編集者です。
 以下のニュースは英語ソースからの情報です。Bluesky 向けの「投稿本文」だけを**日本語で**、次の**構成・改行・禁止事項を厳守**して出力してください。
@@ -309,6 +322,9 @@ def build_prompt(title: str, content: str, article_url: str) -> str:
 
 【記事の概要・内容（英語など原文のまま）】
 {content}
+
+【記事の公開日（1 行目の見出しの括弧内に、この文字列をそのまま使う。変更しない）】
+{published_date_slash}
 
 【参照用の記事URL（本文・引用に含めない。別途リンクカードとして添付する）】
 {article_url}
@@ -323,7 +339,7 @@ def build_prompt(title: str, content: str, article_url: str) -> str:
 ・**箇条書き（■）の各項目どうしのあいだも、必ず空行で区切ること**
 ・**注釈（※）行のうえにも空行を挟み、注釈（※）行の下にも、必ず改行を入れること**（※が本文の最後の意味のある行になり、その直後は改行のみ）
 
-1 行目：「【〜】」形式の見出しとして核心を短く。体言止めや「〜を発表」「〜が判明」「〜を示す」など、簡潔な表現で一行に収める
+1 行目：見出しは**必ず** **【記事タイトルの要約】（{published_date_slash}）** という形に合わせる。【】内には英語タイトルの直訳ではなく、記事の核心を踏まえた**日本語の短い要約**を書く。**（）内の日付**は【記事の公開日】の **{published_date_slash}** と一字一句同じにする。体言止めや「〜を発表」「〜が判明」「〜を示す」など、簡潔な表現で一行に収める
 
 2〜4 行目：箇条書き**3 点**。各行は「■」で始める。**体言止め（名詞で終わる形）にしない**。**単語の列挙にもしない**。「〜を実現した」「〜を解明した」「〜を示した」「〜が示唆される」など、**文末が自然な動詞表現で終わる**一文にする（過去形・現在形どちらでも可。ただし下記の句点禁止に従う）
 
@@ -350,12 +366,14 @@ def _response_text(response: object) -> str:
         return ""
 
 
-def generate_post_text(title: str, content: str, article_url: str) -> str:
+def generate_post_text(
+    title: str, content: str, article_url: str, published_date_slash: str
+) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     model_name = os.getenv("GEMINI_MODEL")
     candidates = [model_name] if model_name else list(DEFAULT_MODELS)
 
-    prompt = build_prompt(title, content, article_url)
+    prompt = build_prompt(title, content, article_url, published_date_slash)
     last_error: Exception | None = None
     for name in candidates:
         if not name:
@@ -432,20 +450,20 @@ def main() -> None:
     posted_urls = load_posted_urls()
     entries = fetch_all_entries()
 
-    chosen: tuple[str, str, str] | None = None
-    for title, content, article_url in entries:
+    chosen: tuple[str, str, str, str] | None = None
+    for title, content, article_url, published_date_slash in entries:
         article_url = normalize_article_url(article_url)
         if article_url not in posted_urls:
-            chosen = (title, content, article_url)
+            chosen = (title, content, article_url, published_date_slash)
             break
 
     if chosen is None:
         print("No new news found.")
         raise SystemExit(0)
 
-    title, content, article_url = chosen
+    title, content, article_url, published_date_slash = chosen
 
-    body = generate_post_text(title, content, article_url)
+    body = generate_post_text(title, content, article_url, published_date_slash)
     body_text = finalize_post_body(body)
     preview = fetch_link_preview(article_url)
     post_to_bluesky(body_text, article_url, rss_title=title, preview=preview)
