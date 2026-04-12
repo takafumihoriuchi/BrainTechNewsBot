@@ -1,12 +1,14 @@
 """
-BrainTech 関連ニュースを Google News RSS から取得し、Gemini で要約投稿文を生成、Bluesky に投稿する。
+グローバル（英語）の BrainTech / BCI / 神経科学ニュースを Google News RSS から取得し、
+Gemini で日本語要約を生成して Bluesky に投稿する。
+
 環境変数（.env）:
   GEMINI_API_KEY, BLUESKY_HANDLE, BLUESKY_APP_PASSWORD
   任意: GEMINI_MODEL（既定: gemini-2.5-flash → gemini-2.5-flash-lite）
   任意: DRY_RUN=1 で Bluesky への投稿をスキップし、生成テキストのみ表示
 
-直近投稿URLはリポジトリ直下の last_post.txt に保存する。
-RSS の先頭記事 URL がそれと一致する場合は新しい記事がないとみなし、Bluesky には投稿しない。
+直近投稿した記事 URL を last_post.txt に保存する。
+取得した記事 URL が（正規化後）それと一致する場合は投稿・Gemini を一切行わず終了する。
 """
 
 from __future__ import annotations
@@ -22,15 +24,25 @@ from atproto import Client
 from dotenv import load_dotenv
 from google import genai
 
+# 英語圏のグローバルニュース（記事本文の要約は Gemini で日本語に変換）
 RSS_URL = (
     "https://news.google.com/rss/search?"
-    "q=BrainTech+OR+BCI+OR+Neuroscience&hl=ja&gl=JP&ceid=JP:ja"
+    "q=Brain-Computer+Interface+OR+BCI+OR+BrainTech+OR+Neuroscience"
+    "&hl=en&gl=US&ceid=US:en"
 )
 
 # Bluesky の投稿は 300 文字まで（本文末尾にスペース＋記事 URL を含めた合計）
 POST_MAX = 300
 DEFAULT_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
 LAST_POST_FILE = Path(__file__).resolve().parent / "last_post.txt"
+
+
+def normalize_article_url(url: str) -> str:
+    """比較・保存用に URL を揃える（末尾スラッシュや前後空白の差で二重投稿しない）。"""
+    s = (url or "").strip()
+    if len(s) > 1 and s.endswith("/"):
+        s = s.rstrip("/")
+    return s
 
 
 def strip_html(text: str) -> str:
@@ -65,7 +77,7 @@ def fetch_latest_entry() -> tuple[str, str, str]:
         sys.exit(1)
     e = entries[0]
     title = strip_html(getattr(e, "title", "") or "")
-    link = (getattr(e, "link", "") or "").strip()
+    link = normalize_article_url((getattr(e, "link", "") or "").strip())
     raw = getattr(e, "summary", None) or getattr(e, "description", "") or ""
     content = strip_html(raw) or title
     if not title:
@@ -82,19 +94,13 @@ def read_last_post_url() -> str | None:
         return None
     try:
         s = LAST_POST_FILE.read_text(encoding="utf-8").strip()
-        return s or None
+        return normalize_article_url(s) if s else None
     except OSError:
         return None
 
 
 def write_last_post_url(url: str) -> None:
-    LAST_POST_FILE.write_text(url.strip() + "\n", encoding="utf-8")
-
-
-def should_skip_no_new_article(current_url: str) -> bool:
-    """直近に投稿した記事と同じ URL なら、新規ニュースなしとしてスキップする。"""
-    previous = read_last_post_url()
-    return previous is not None and current_url == previous
+    LAST_POST_FILE.write_text(normalize_article_url(url) + "\n", encoding="utf-8")
 
 
 def body_char_budget(url: str) -> int:
@@ -105,26 +111,28 @@ def body_char_budget(url: str) -> int:
 
 def build_prompt(title: str, content: str, url: str) -> str:
     budget = body_char_budget(url)
-    return f"""あなたはブレインテック（BCI・神経科学など）に詳しい編集者です。次のニュースをもとに、Bluesky 向けの投稿本文だけを書いてください。
+    return f"""あなたはブレインテック（BCI・脳コンピュータインタフェース・神経科学など）に詳しい編集者です。
+以下のニュースは英語ソースからの情報です。内容を踏まえ、Bluesky 向けの「投稿本文」だけを**日本語で**書いてください。
 
-【記事タイトル】
+【記事タイトル（英語のまま引用可）】
 {title}
 
-【記事の概要・内容】
+【記事の概要・内容（英語など原文のまま）】
 {content}
 
-【投稿に付けるURL（本文の直後にスペース1つ空けて末尾に付与する）】
+【投稿末尾に付けるURL（本文には含めない。スペース1つ＋このURLで300字以内に収める）】
 {url}
 
-【最優先のトーン・内容】
-・記事を理解するうえで必要な前提知識を、必ず補足すること（短い一文や括弧書きでよい）。
-・専門用語は噛み砕き、要点を絞ってわかりやすくまとめること。
+【最優先のトーン・内容（すべて日本語で）】
+・記事を理解するうえで必要な前提知識を、必ず日本語で補足すること（短い一文や括弧書きでよい）。
+・専門用語は日本語で噛み砕き説明し、要点を絞ってわかりやすくまとめること。
+・英語のまま出力してはいけない（固有名詞・製品名・論文名など必要最小限の英単語のみ可）。
 
 【形式】
-・出力は「投稿本文のみ」。引用符・箇条書き・「投稿:」などの余計なラベルは付けないこと。
-・上記URLは出力に含めない。本文のみを出力すること。
+・出力は「日本語の投稿本文のみ」。引用符・箇条書き・「投稿:」などのラベルは付けないこと。
+・上記URLは本文に含めない。
 ・本文の文字数上限: {budget} 文字（日本語は1文字で1と数える）。改行は使わないこと。
-・最終投稿は「本文＋スペース＋URL」の合計が厳密に {POST_MAX} 文字以下になるようにすること（URLの文字数は {len(url)} 文字）。"""
+・最終投稿は「日本語本文＋スペース＋URL」の合計が厳密に {POST_MAX} 文字以下になるようにすること（URLの文字数は {len(url)} 文字）。"""
 
 
 def _response_text(response: object) -> str:
@@ -200,8 +208,9 @@ def post_to_bluesky(text: str) -> None:
 def main() -> None:
     load_env()
     title, content, url = fetch_latest_entry()
-    if should_skip_no_new_article(url):
-        # 重複時は Bluesky / Gemini を呼ばず正常終了（GitHub Actions を赤くしない）
+    last_key = read_last_post_url()
+    if last_key is not None and url == last_key:
+        # 重複時は Gemini / Bluesky / last_post 更新を一切行わない（Early Return）
         print("No new news found. Skipping post.")
         raise SystemExit(0)
     # 「スペース + URL」単体で 300 文字を超える場合は投稿不可
