@@ -48,16 +48,19 @@ jobs:
       - name: Run bot
         run: python main.py
 
+      # 作業ツリーに未ステージの last_post.txt がある状態で pull すると失敗するため、
+      # 先に add →（差分があれば）commit してから pull --rebase する。
       - name: Commit and push last_post.txt
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin ${{ github.ref_name }}
-          git pull --rebase origin ${{ github.ref_name }}
+          git fetch origin "${{ github.ref_name }}"
           git add -f last_post.txt
           if git diff --staged --quiet; then
             echo "No changes to last_post.txt"
           else
             git commit -m "chore: update last_post.txt [skip ci]"
-            git push
           fi
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "${{ github.ref_name }}"
