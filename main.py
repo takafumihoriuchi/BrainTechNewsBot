@@ -8,7 +8,8 @@ Bluesky にリンクカード付きで投稿する。
   任意: DRY_RUN=1 で Bluesky への投稿をスキップし、生成テキストのみ表示
 
 投稿済み記事 URL を last_post.txt に 1 行 1 URL で蓄え（直近 100 件を上限）、
-新しい順の一覧の先頭から、履歴に無い最初の記事（未投稿のうち最新）を投稿する。
+一覧は固有名詞キーワード（PRIORITY_KEYWORDS）一致を優先し、同一優先度では新しい順。
+履歴に無い最初の記事を投稿する。
 """
 
 from __future__ import annotations
@@ -38,6 +39,18 @@ RSS_FEEDS: tuple[str, ...] = (
     "https://www.eurekalert.org/rss/neuroscience.xml",
     "https://www.frontiersin.org/journals/neuroscience/rss",
     "https://phys.org/rss-feed/science-news/neuroscience/",
+)
+
+# タイトル・本文に含まれる場合のみ優先（大文字小文字は区別しない）。広すぎる語は入れない
+PRIORITY_KEYWORDS: tuple[str, ...] = (
+    "Neuralink",
+    "Synchron",
+    "Stentrode",
+    "Paradromics",
+    "Blackrock Neurotech",
+    "Precision Neuroscience",
+    "Motional",
+    "Elon Musk",
 )
 
 POST_MAX = 300
@@ -182,6 +195,12 @@ def load_env() -> None:
         sys.exit(1)
 
 
+def _matches_priority_keywords(title: str, content: str) -> bool:
+    """PRIORITY_KEYWORDS のいずれかがタイトルまたは本文に含まれるか（大文字小文字を区別しない）。"""
+    hay = f"{title} {content}".lower()
+    return any(kw.lower() in hay for kw in PRIORITY_KEYWORDS)
+
+
 def _entry_published_ts(entry: object) -> float:
     t = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
     if t:
@@ -210,7 +229,7 @@ def _entry_to_article(e: object) -> tuple[str, str, str, str] | None:
 
 
 def fetch_all_entries() -> list[tuple[str, str, str, str]]:
-    """複数 RSS からエントリを集め、公開日時の新しい順に並べたリストを返す（同一 URL は新しい方のみ）。"""
+    """複数 RSS からエントリを集め、キーワード優先のうえで公開日時が新しい順のリストを返す（同一 URL は新しい方のみ）。"""
     scored: list[tuple[float, object]] = []
     for feed_url in RSS_FEEDS:
         parsed = feedparser.parse(feed_url)
@@ -229,16 +248,20 @@ def fetch_all_entries() -> list[tuple[str, str, str, str]]:
     scored.sort(key=lambda x: x[0], reverse=True)
 
     seen_urls: set[str] = set()
-    out: list[tuple[str, str, str, str]] = []
-    for _, e in scored:
+    rows_meta: list[tuple[tuple[str, str, str, str], float, bool]] = []
+    for ts, e in scored:
         row = _entry_to_article(e)
         if row is None:
             continue
-        _, _, link, _ = row
+        title, content, link, _ = row
         if link in seen_urls:
             continue
         seen_urls.add(link)
-        out.append(row)
+        pri = _matches_priority_keywords(title, content)
+        rows_meta.append((row, ts, pri))
+
+    rows_meta.sort(key=lambda x: (not x[2], -x[1]))
+    out = [r[0] for r in rows_meta]
     if not out:
         print("有効なエントリを 1 件も組み立てられませんでした。", file=sys.stderr)
         sys.exit(1)
