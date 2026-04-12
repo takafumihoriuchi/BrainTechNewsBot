@@ -282,10 +282,24 @@ def body_char_budget() -> int:
     return POST_MAX
 
 
+def _normalize_bluesky_body_whitespace(text: str) -> str:
+    """行内の空白のみ畳み、改行は Bluesky 投稿用に維持する。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    lines: list[str] = []
+    for line in text.splitlines():
+        condensed = re.sub(r"[ \t\u3000]+", " ", line).strip()
+        lines.append(condensed)
+    out = "\n".join(lines)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def build_prompt(title: str, content: str, article_url: str) -> str:
     budget = body_char_budget()
     return f"""あなたはブレインテック（BCI・脳コンピュータインタフェース・神経科学など）に詳しい編集者です。
-以下のニュースは英語ソースからの情報です。内容を踏まえ、Bluesky 向けの「投稿本文」だけを**日本語で**書いてください。
+以下のニュースは英語ソースからの情報です。Bluesky 向けの「投稿本文」だけを**日本語で**、次の**構成と改行を厳守**して出力してください。
 
 【記事タイトル（英語のまま引用可）】
 {title}
@@ -293,18 +307,32 @@ def build_prompt(title: str, content: str, article_url: str) -> str:
 【記事の概要・内容（英語など原文のまま）】
 {content}
 
-【参照用の記事URL（本文には書かない。別途リンクカードとして添付する）】
+【参照用の記事URL（本文・引用に含めない。別途リンクカードとして添付する）】
 {article_url}
 
-【最優先のトーン・内容（すべて日本語で）】
-・記事を理解するうえで必要な前提知識を、必ず日本語で補足すること（短い一文や括弧書きでよい）。
-・専門用語は日本語で噛み砕き説明し、要点を絞ってわかりやすくまとめること。
-・英語のまま出力してはいけない（固有名詞・製品名・論文名など必要最小限の英単語のみ可）。
+【出力フォーマット（この順・この改行でそのまま出力）】
+一行目：行頭に「【結論/見出し】」を付け、その直後に記事の最も重要なポイントを一言で凝縮する（凝縮部分は目安 15〜20 文字程度）。
 
-【形式】
-・出力は「日本語の投稿本文のみ」。引用符・箇条書き・「投稿:」などのラベルは付けないこと。
-・記事URLやハイパーリンクは本文に含めない（リンクはシステム側でカード表示する）。
-・本文の文字数上限: {budget} 文字（日本語は1文字で1と数える）。改行は使わないこと。"""
+二行目：空行（改行のみの行を 1 行入れ、視覚的な余白を作る）
+
+三行目・四行目：弾丸ポイント（・）による要約
+　専門的な内容を**2 点**、それぞれ「・」で始める 1 行ずつ。簡潔に。
+
+五行目：専門的補足（前提知識）
+　「（注：〜）」の形式で、理解を助ける一文だけ。
+
+【文体・トーン】
+・「〜です」「〜ます」は避け、体言止めや「〜を発表」「〜が判明」「〜を示す」など簡潔な語尾で統一する。
+・情報を詰め込みすぎず、{budget} 文字以内で読みやすさを優先する。
+・改行（\\n）を効果的に使い、空行で区切って圧迫感を減らす。
+・英語のまま出力しない（固有名詞・製品名・論文名など必要最小限の英単語のみ可）。
+・記事 URL・ハイパーリンクは本文に一切含めない。
+
+【文字数】
+投稿本文全体で {budget} 文字以内（改行も 1 文字として数える）。見出し・空行・箇条書き・（注：）を含めた合計。
+
+【出力】
+上記フォーマットのテキストのみ。説明文・ラベル「投稿:」・引用符で全体を囲むことはしない。"""
 
 
 def _response_text(response: object) -> str:
@@ -322,16 +350,12 @@ def generate_post_text(title: str, content: str, article_url: str) -> str:
 
     prompt = build_prompt(title, content, article_url)
     last_error: Exception | None = None
-    cap = body_char_budget()
     for name in candidates:
         if not name:
             continue
         try:
             response = client.models.generate_content(model=name, contents=prompt)
-            body = _response_text(response)
-            body = re.sub(r"\s+", " ", body)
-            if cap and len(body) > cap:
-                body = body[:cap].rstrip()
+            body = _normalize_bluesky_body_whitespace(_response_text(response))
             if body:
                 return body
             last_error = RuntimeError("Gemini が空の応答を返しました")
@@ -343,7 +367,7 @@ def generate_post_text(title: str, content: str, article_url: str) -> str:
 
 
 def finalize_post_body(body: str) -> str:
-    body = re.sub(r"\s+", " ", body.strip())
+    body = _normalize_bluesky_body_whitespace(body)
     if len(body) <= POST_MAX:
         return body
     return body[:POST_MAX].rstrip()
