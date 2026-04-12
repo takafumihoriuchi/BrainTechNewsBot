@@ -201,8 +201,9 @@ def main() -> None:
     load_env()
     title, content, url = fetch_latest_entry()
     if should_skip_no_new_article(url):
+        # 重複時は Bluesky / Gemini を呼ばず正常終了（GitHub Actions を赤くしない）
         print("No new news found. Skipping post.")
-        sys.exit(0)
+        raise SystemExit(0)
     # 「スペース + URL」単体で 300 文字を超える場合は投稿不可
     if len(url) > POST_MAX - 1:
         print(
