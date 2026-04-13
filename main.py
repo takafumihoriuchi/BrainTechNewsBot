@@ -38,7 +38,6 @@ RSS_FEEDS: tuple[str, ...] = (
     "https://spectrum.ieee.org/rss/topic/brain-machine-interfaces/fulltext",
     "https://www.eurekalert.org/rss/neuroscience.xml",
     "https://www.frontiersin.org/journals/neuroscience/rss",
-    "https://phys.org/rss-feed/science-news/neuroscience/",
 )
 
 # タイトル・本文に含まれる場合のみ優先（大文字小文字は区別しない）。広すぎる語は入れない
