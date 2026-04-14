@@ -229,13 +229,21 @@ def _entry_to_article(e: object) -> tuple[str, str, str, str] | None:
 def fetch_all_entries() -> list[tuple[str, str, str, str]]:
     """複数 RSS からエントリを集め、キーワード優先のうえで公開日時が新しい順のリストを返す（同一 URL は新しい方のみ）。"""
     scored: list[tuple[float, object]] = []
+    session = requests.Session()
+    session.headers.update(_REQUEST_HEADERS)
     for feed_url in RSS_FEEDS:
-        parsed = feedparser.parse(feed_url)
-        if getattr(parsed, "bozo", False) and not getattr(parsed, "entries", None):
-            print(
-                f"RSS 警告 ({feed_url}): {getattr(parsed, 'bozo_exception', '')}",
-                file=sys.stderr,
-            )
+        try:
+            r = session.get(feed_url, timeout=25.0, allow_redirects=True)
+            r.raise_for_status()
+        except requests.RequestException as ex:
+            print(f"RSS 取得エラー ({feed_url}): {ex}", file=sys.stderr)
+            continue
+
+        parsed = feedparser.parse(r.content)
+        if getattr(parsed, "bozo", False):
+            bozo_ex = getattr(parsed, "bozo_exception", None)
+            if bozo_ex:
+                print(f"RSS 警告 ({feed_url}): {bozo_ex}", file=sys.stderr)
         for e in getattr(parsed, "entries", []) or []:
             scored.append((_entry_published_ts(e), e))
 
