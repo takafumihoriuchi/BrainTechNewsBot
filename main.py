@@ -59,12 +59,11 @@ POSTED_URL_HISTORY_MAX = 100
 
 def _default_http_headers() -> dict[str, str]:
     return {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
     }
 
 
@@ -238,6 +237,8 @@ def fetch_all_entries() -> list[tuple[str, str, str, str]]:
         except requests.RequestException as ex:
             print(f"RSS 取得エラー ({feed_url}): {ex}", file=sys.stderr)
             continue
+        finally:
+            time.sleep(1)
 
         parsed = feedparser.parse(r.content)
         if getattr(parsed, "bozo", False):
@@ -481,8 +482,10 @@ def post_to_bluesky(
 
 def main() -> None:
     load_env()
+    print("DEBUG: Bot started with the latest code version.")
     posted_urls = load_posted_urls()
     entries = fetch_all_entries()
+    print(f"DEBUG: Found {len(entries)} candidate entries.")
 
     chosen: tuple[str, str, str, str] | None = None
     for title, content, article_url, published_date_slash in entries:
